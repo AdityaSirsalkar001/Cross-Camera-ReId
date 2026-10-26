@@ -2,14 +2,16 @@ import torch
 import torchvision.transforms as T
 from torchvision.models import resnet50, ResNet50_Weights
 from ultralytics import YOLO
-from config import PROJECT_DIR
+from config import BASE_DIR
 
 print("Loading vision models...")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # one YOLO instance per camera (tracker state is kept inside the model)
-yolo_cam1 = YOLO(str(PROJECT_DIR / "yolov8n.pt"))
-yolo_cam2 = YOLO(str(PROJECT_DIR / "yolov8n.pt"))
+# Will automatically download 'yolov8n.pt' if not present locally
+yolo_weight = str(BASE_DIR / "yolov8n.pt") if (BASE_DIR / "yolov8n.pt").exists() else "yolov8n.pt"
+yolo_cam1 = YOLO(yolo_weight)
+yolo_cam2 = YOLO(yolo_weight)
 
 resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
 resnet.eval()

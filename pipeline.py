@@ -12,9 +12,15 @@ from global_ids import GlobalIDs, draw
 cap1 = cv2.VideoCapture(CAM1_PATH)
 cap2 = cv2.VideoCapture(CAM2_PATH)
 
+if not cap1.isOpened():
+    raise FileNotFoundError(f"[ERROR] Could not open Camera 1 video stream at: '{CAM1_PATH}'. Please place 'cam1.mp4' in the project directory or update config.py.")
+if not cap2.isOpened():
+    raise FileNotFoundError(f"[ERROR] Could not open Camera 2 video stream at: '{CAM2_PATH}'. Please place 'cam2.mp4' in the project directory or update config.py.")
+
 width = int(cap1.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap1.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fps = int(cap1.get(cv2.CAP_PROP_FPS)) or 25
+total_frames = int(cap1.get(cv2.CAP_PROP_FRAME_COUNT))
 diag = math.hypot(width, height)
 
 # temporal alignment of the two videos (if they don't start together)
@@ -103,6 +109,10 @@ while cap1.isOpened() and cap2.isOpened():
             txt += f" ({min(rev[t.tid], 1.0):.2f})"
         draw(frame2, t.box, g, txt)
 
+    if frame_idx % 30 == 0:
+        total = total_frames if total_frames > 0 else 1334
+        print(f"Processing frame {frame_idx}/{total} ({(frame_idx/total*100):.1f}%) | Active: Cam1={len(act1)}, Cam2={len(act2)} | Global IDs: {gids.next_id - 1}")
+
     # housekeeping
     if frame_idx % 150 == 0:
         pair_ema = {k: v for k, v in pair_ema.items()
@@ -111,9 +121,13 @@ while cap1.isOpened() and cap2.isOpened():
     combined_frame = cv2.hconcat([frame1, frame2])
     out.write(combined_frame)
 
-    cv2.imshow("Cross-Camera Re-ID Stream", combined_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    try:
+        cv2.imshow("Cross-Camera Re-ID Stream", combined_frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("User requested early termination via 'q' key.")
+            break
+    except Exception:
+        pass
     frame_idx += 1
 
 cap1.release()

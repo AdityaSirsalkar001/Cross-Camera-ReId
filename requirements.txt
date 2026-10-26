@@ -1,0 +1,17 @@
+# Core Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Detection & Tracking
+ultralytics>=8.0.0
+
+# Computer Vision & Image Processing
+opencv-python>=4.8.0
+pillow>=9.5.0
+
+# Scientific Computing & Optimization
+numpy>=1.23.0
+scipy>=1.10.0
+
+# Visualization & Plotting (Optional / Evaluation)
+matplotlib>=3.7.0

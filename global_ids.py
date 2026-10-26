@@ -1,3 +1,4 @@
+import cv2
 from models import COLORS
 
 class GlobalIDs:
