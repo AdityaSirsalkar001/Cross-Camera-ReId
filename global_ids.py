@@ -1,3 +1,5 @@
+import cv2
+
 from models import COLORS
 
 class GlobalIDs:
@@ -24,19 +26,25 @@ class GlobalIDs:
     def link(self, t1, t2):
         g1, g2 = self.get(1, t1), self.get(2, t2)
         if g1 is not None and g1 == g2:
-            return
+            return g1
+        if g1 is not None and g2 is not None:
+            # A confirmed local-track identity is immutable.
+            return None
         if g1 is not None:
             self.of[2][t2] = g1
             self.pair[g1][2] = t2
+            return g1
         elif g2 is not None:
             self.of[1][t1] = g2
             self.pair[g2][1] = t1
+            return g2
         else:
             g = self.next_id
             self.next_id += 1
             self.of[1][t1] = g
             self.of[2][t2] = g
             self.pair[g] = {1: t1, 2: t2}
+            return g
 
 
 def draw(frame, box, gid, text):
@@ -45,3 +53,12 @@ def draw(frame, box, gid, text):
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
     cv2.putText(frame, text, (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+
+def draw_local(frame, box, cam, tid, label="OBJECT"):
+    """Show a local track while it is still waiting for cross-camera confirmation."""
+    color = (160, 160, 160)
+    x1, y1, x2, y2 = box
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    cv2.putText(frame, f"{label} C{cam} local:{tid}", (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)

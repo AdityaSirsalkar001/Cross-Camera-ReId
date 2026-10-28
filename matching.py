@@ -1,88 +1,67 @@
 import math
-import numpy as np
+
 import cv2
-from config import DEEP_LOW, DEEP_HIGH, W_DEEP, W_COLOR, MOVE_THR, POS_SIGMA, SPATIAL_GATE, GATE_FRAC, ONSET_TAU_SEC, W_A, W_M, W_T
-from homography import GroundMapper
+import numpy as np
+
+from config import (
+    MAX_GROUND_ERROR_FRAC,
+    MIN_APPEARANCE_SAMPLES,
+    MIN_OVERLAP_SAMPLES,
+    W_A,
+    W_S,
+    W_T,
+)
+
 
 def appearance_sim(t1, t2):
-    if t1.emb is None or t2.emb is None:
-        return 0.0
-    cos = float(np.dot(t1.emb, t2.emb))
-    deep = min(max((cos - DEEP_LOW) / (DEEP_HIGH - DEEP_LOW), 0.0), 1.0)
-    col = np.mean([1.0 - cv2.compareHist(a, b, cv2.HISTCMP_BHATTACHARYYA)
-                   for a, b in zip(t1.hist, t2.hist)])
-    return W_DEEP * deep + W_COLOR * float(col)
-
-
-def speed_series_corr(t1, t2):
-    """Do both tracks speed up / slow down at the same times? (None if uninformative)"""
-    d1, d2 = dict(t1.speeds), dict(t2.speeds)
-    common = sorted(set(d1) & set(d2))
-    if len(common) < 10:
+    """Compare accumulated OSNet, clothing-colour, and body-shape profiles."""
+    if (
+        t1.emb is None or t2.emb is None
+        or t1.shape is None or t2.shape is None
+        or t1.appearance_samples < MIN_APPEARANCE_SAMPLES
+        or t2.appearance_samples < MIN_APPEARANCE_SAMPLES
+    ):
         return None
-    a = np.array([d1[f] for f in common])
-    b = np.array([d2[f] for f in common])
-    fa, fb = a.std() < 0.05, b.std() < 0.05
-    if fa and fb:
-        return None
-    if fa != fb:
-        return 0.3
-    c = np.corrcoef(a, b)[0, 1]
-    return 0.5 if np.isnan(c) else (c + 1.0) / 2.0
+
+    reid = float(np.clip(np.dot(t1.emb, t2.emb), 0.0, 1.0))
+    color = float(np.mean([
+        1.0 - cv2.compareHist(a, b, cv2.HISTCMP_BHATTACHARYYA)
+        for a, b in zip(t1.hist, t2.hist)
+    ]))
+    hog = float(np.clip(np.dot(t1.shape, t2.shape), 0.0, 1.0))
+    ratio = math.exp(
+        -abs(math.log(max(t1.shape_ratio, 1e-6) / max(t2.shape_ratio, 1e-6))) / 0.45
+    )
+    body_shape = 0.75 * hog + 0.25 * ratio
+    if t1.cls == 1:  # OSNet was trained for people, so rely more on robot colour/shape.
+        return 0.20 * reid + 0.62 * color + 0.18 * body_shape
+    return 0.75 * reid + 0.18 * color + 0.07 * body_shape
 
 
-def spatial_dist(t1, t2, mapper, diag):
-    """Distance (fraction of diagonal) between cam1 foot point and projected cam2 foot point."""
-    if not mapper.ready:
-        return None
-    px, py = mapper.project(t2.foot())
-    fx, fy = t1.foot()
-    return math.hypot(px - fx, py - fy) / diag
-
-
-def motion_sim(t1, t2, mapper, diag):
-    s1, s2 = t1.cur_speed(), t2.cur_speed()
-    parts = [(math.exp(-abs(s1 - s2) / (max(s1, s2) + 0.3)), 0.30)]   # speed agreement
-
-    corr = speed_series_corr(t1, t2)                                  # temporal motion sync
-    if corr is not None:
-        parts.append((corr, 0.20))
-
-    if mapper.ready:
-        d = spatial_dist(t1, t2, mapper, diag)                        # trajectory position
-        parts.append((math.exp(-(d / POS_SIGMA) ** 2), 0.30))
-
-        dp1, dp2 = t1.displacement_pts(), t2.displacement_pts()       # trajectory direction
-        direction = 0.5
-        if dp1 and dp2 and s1 > MOVE_THR and s2 > MOVE_THR:
-            v1 = np.array(dp1[1]) - np.array(dp1[0])
-            a0, a1 = mapper.project(dp2[0]), mapper.project(dp2[1])
-            v2 = np.array(a1) - np.array(a0)
-            n = np.linalg.norm(v1) * np.linalg.norm(v2)
-            if n > 1e-6:
-                direction = (float(np.dot(v1, v2) / n) + 1.0) / 2.0
-        parts.append((direction, 0.20))
-
-    tw = sum(w for _, w in parts)
-    return sum(s * w for s, w in parts) / tw
-
-
-def temporal_sim(t1, t2, fps):
-    overlap = max(0, min(t1.last, t2.last) - max(t1.first, t2.first) + 1)
-    dur = min(t1.last - t1.first + 1, t2.last - t2.first + 1)
-    overlap_ratio = overlap / max(dur, 1)
-    onset = math.exp(-abs(t1.first - t2.first) / (ONSET_TAU_SEC * fps))
-    return 0.5 * overlap_ratio + 0.5 * onset
-
-
-def fused_score(t1, t2, mapper, diag, fps):
-    """Returns fused score or None if a consistency check rejects the pair."""
+def tracklet_score(t1, t2, mapper, frame_diagonal):
+    """Score two complete tracklets using ReID and synchronized floor positions."""
     if t1.cls != t2.cls:
-        return None
-    if SPATIAL_GATE and mapper.ready:
-        if spatial_dist(t1, t2, mapper, diag) > GATE_FRAC:
-            return None
-    sa = appearance_sim(t1, t2)
-    sm = motion_sim(t1, t2, mapper, diag)
-    st = temporal_sim(t1, t2, fps)
-    return W_A * sa + W_M * sm + W_T * st
+        return None, "different classes"
+    app = appearance_sim(t1, t2)
+    if app is None:
+        return None, "too few appearance samples"
+
+    common_frames = sorted(set(t1.trajectory).intersection(t2.trajectory))
+    if len(common_frames) < MIN_OVERLAP_SAMPLES:
+        return None, "insufficient synchronized overlap"
+
+    distances = []
+    for frame in common_frames:
+        projected = mapper.project(t2.trajectory[frame])
+        point1 = t1.trajectory[frame]
+        distances.append(math.hypot(projected[0] - point1[0], projected[1] - point1[1]))
+
+    median_error = float(np.median(distances))
+    error_limit = MAX_GROUND_ERROR_FRAC * frame_diagonal
+    if median_error > error_limit:
+        return None, f"floor mismatch ({median_error:.0f}px > {error_limit:.0f}px)"
+
+    spatial = math.exp(-median_error / max(error_limit * 0.45, 1.0))
+    overlap = len(common_frames) / max(min(len(t1.trajectory), len(t2.trajectory)), 1)
+    score = W_A * app + W_S * spatial + W_T * min(overlap, 1.0)
+    return (score, app, median_error, len(common_frames)), None

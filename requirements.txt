@@ -1,0 +1,11 @@
+# Install a PyTorch build appropriate for the target GPU first (see README.md).
+ultralytics
+opencv-python
+numpy
+scipy
+huggingface_hub
+Cython
+gdown
+yacs
+h5py
+tensorboard
