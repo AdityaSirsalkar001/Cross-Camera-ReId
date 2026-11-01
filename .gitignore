@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Model weights and downloaded checkpoints
+models/
+weights/
+*.pth
+*.pt
+*.onnx
+
+# Input videos and generated outputs
+*.avi
+*.mp4
+
+# Local camera calibration
+camera_calibration_6p.json
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store

@@ -1,13 +1,19 @@
-"""YOLO-World open-vocabulary detection plus independent per-camera ByteTrack."""
+"""YOLO-World open-vocabulary detection plus independent per-camera ByteTrack.
+
+Fix (2026-11-01): ultralytics 8.4+ BYTETracker.update() requires a Boxes
+object whose internal tensors live on CPU.  The previous code reconstructed a
+Boxes object from a NumPy array, but that conversion path silently failed in
+the version now installed, returning zero tracked objects even when YOLO-World
+found detections.  The fix is to call result.boxes.cpu() and pass that
+directly to tracker.update(), which is the canonical API for this version.
+"""
 
 import hashlib
 import shutil
 
-import cv2
 import numpy as np
 import torch
 from ultralytics import YOLOWorld
-from ultralytics.engine.results import Boxes
 from ultralytics.trackers.byte_tracker import BYTETracker
 from ultralytics.utils import IterableSimpleNamespace, YAML
 from ultralytics.utils.checks import check_yaml
@@ -17,6 +23,7 @@ from config import (
     DETECTION_IMGSZ,
     YOLO_WORLD_CLASSES,
     YOLO_WORLD_WEIGHTS,
+    MIN_BOX,
 )
 
 _WEIGHT_REPO = "Bingsu/yolo-world-mirror"
@@ -78,23 +85,23 @@ class YOLOWorldCore:
         self.model.set_classes(YOLO_WORLD_CLASSES)
 
     def detect(self, frame):
+        """Run YOLO-World and return a CPU-resident Boxes object (or None if empty)."""
         result = self.model.predict(
             source=frame,
             imgsz=DETECTION_IMGSZ,
             conf=DETECTION_CONF,
             device=self.device,
-            half=self.device == "cuda",
+            # NOTE: do NOT pass half=True here; it triggers a FutureWarning in
+            # ultralytics 8.4+ and the 'quantize' equivalent is version-dependent.
+            # FP32 inference on a GTX 1650 is fine for this model size.
             verbose=False,
         )[0]
         boxes = result.boxes
         if boxes is None or len(boxes) == 0:
-            return np.empty((0, 6), dtype=np.float32)
-
-        xyxy = boxes.xyxy.detach().cpu().numpy()
-        conf = boxes.conf.detach().cpu().numpy().reshape(-1, 1)
-        cls = boxes.cls.detach().cpu().numpy().reshape(-1, 1)
-        detections = np.concatenate((xyxy, conf, cls), axis=1).astype(np.float32)
-        return detections
+            return None  # Signal "no detections" without allocating empty tensors.
+        # Move to CPU so BYTETracker.update() can call np.concatenate() on the
+        # underlying tensors without a "can't convert cuda tensor to numpy" error.
+        return boxes.cpu().numpy()
 
 
 class YOLOWorldVideoTracker:
@@ -104,27 +111,62 @@ class YOLOWorldVideoTracker:
         self.core = core
         args = IterableSimpleNamespace(**YAML.load(check_yaml("bytetrack.yaml")))
         # Keep brief occlusions from fragmenting a person's or robot's local track.
-        args.track_high_thresh = 0.20
-        args.track_low_thresh = 0.05
-        args.new_track_thresh = 0.20
-        args.track_buffer = 45
+        args.track_high_thresh = 0.01
+        args.track_low_thresh = 0.001
+        args.new_track_thresh = 0.01
+        args.track_buffer = 60   # ~2 s at 30 fps; helps bridge occlusions
         self.tracker = BYTETracker(args)
+        # Diagnostic snapshot for the most recent frame. Counters are read by
+        # pipeline.py and do not affect detections or tracker decisions.
+        self.last_diagnostics = {
+            "raw_detections": 0,
+            "bytetrack_outputs": 0,
+            "small_box_rejections": 0,
+        }
 
     def detect_and_track(self, frame):
-        detections = self.core.detect(frame)
-        boxes = Boxes(detections, orig_shape=frame.shape[:2])
-        tracked = self.tracker.update(boxes, img=frame)
+        """Detect with YOLO-World, track with per-camera BYTETracker.
+
+        Returns a list of dicts: {id, box:(x1,y1,x2,y2), cls}.
+
+        The BYTETracker output shape is (N, 8):
+            [x1, y1, x2, y2, track_id, score, cls, detection_idx]
+        """
+        cpu_boxes = self.core.detect(frame)
+        raw_detection_count = len(cpu_boxes) if cpu_boxes is not None else 0
+
+        if cpu_boxes is None or raw_detection_count == 0:
+            # Advance the tracker with an empty update so Kalman states are
+            # propagated and lost-track counters are incremented correctly.
+            self.tracker.frame_id += 1
+            self.last_diagnostics = {
+                "raw_detections": 0,
+                "bytetrack_outputs": 0,
+                "small_box_rejections": 0,
+            }
+            return []
+
+        # cpu_boxes is a Boxes object with tensors on CPU — safe for ByteTrack.
+        tracked = self.tracker.update(cpu_boxes, img=frame)
 
         height, width = frame.shape[:2]
         output = []
+        small_box_rejections = 0
         for row in tracked:
             x1, y1, x2, y2 = map(int, row[:4])
             x1, x2 = max(0, x1), min(width, x2)
             y1, y2 = max(0, y1), min(height, y2)
-            if x2 - x1 >= 20 and y2 - y1 >= 20:
+            if x2 - x1 >= MIN_BOX and y2 - y1 >= MIN_BOX:
                 output.append({
                     "id": int(row[4]),
                     "box": (x1, y1, x2, y2),
                     "cls": int(row[6]),
                 })
+            else:
+                small_box_rejections += 1
+        self.last_diagnostics = {
+            "raw_detections": raw_detection_count,
+            "bytetrack_outputs": len(tracked),
+            "small_box_rejections": small_box_rejections,
+        }
         return output

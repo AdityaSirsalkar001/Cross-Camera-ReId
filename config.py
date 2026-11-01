@@ -8,7 +8,9 @@ OUT_PATH = str(BASE_DIR / "reid_output_6p.mp4")
 CALIBRATION_PATH = BASE_DIR / "camera_calibration_6p.json"
 REID_WEIGHTS = BASE_DIR / "osnet_reid.pth"
 YOLO_WORLD_WEIGHTS = BASE_DIR / "models" / "yolov8s-worldv2.pt"
-YOLO_WORLD_CLASSES = ["person", "humanoid robot"]
+# YOLO_WORLD_CLASSES = ["person", "humanoid robot"]
+YOLO_WORLD_CLASSES = ["person"]
+
 PREVIEW_MAX_WIDTH = 1280
 PREVIEW_MAX_HEIGHT = 900
 
@@ -28,7 +30,8 @@ MIN_APPEARANCE_SAMPLES = 4
 TRAJECTORY_SAMPLE_EVERY = 3
 
 DETECTION_IMGSZ = 960
-DETECTION_CONF = 0.12
+# DETECTION_CONF = 0.12
+DETECTION_CONF = 0.01
 
 EMBED_EVERY = 15
 EMB_EMA = 0.30
